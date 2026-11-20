@@ -174,7 +174,7 @@ def build_pdf(d: dict) -> bytes:
     s_left = style("left", alignment=TA_LEFT)
     s_bold = style("bold", fontName="Helvetica-Bold", alignment=TA_LEFT)
     s_re = style("re", fontName="Helvetica-Bold", alignment=TA_CENTER)
-    s_body = style("body", alignment=TA_JUSTIFY, leading=16, spaceAfter=16)
+    s_body = style("body", alignment=TA_JUSTIFY, leading=16, spaceAfter=24)  # 1.5 line spacing after each paragraph
 
     story = []
 
@@ -194,12 +194,17 @@ def build_pdf(d: dict) -> bytes:
 
     # Recipient address block (left, one entry per line)
     if d["include_address"]:
-        lines = ["To,"] + [
-            safe_text(x)
+        entries = [
+            x.strip().rstrip(",.;:")
             for x in (d["rec_name"], d["rec_institution"], d["rec_address"], d["rec_city"])
             if x.strip()
         ]
-        if len(lines) > 1:
+        if entries:
+            # Standard address form: comma after every line, full stop after the last
+            lines = ["To,"] + [
+                safe_text(e) + ("." if i == len(entries) - 1 else ",")
+                for i, e in enumerate(entries)
+            ]
             story.append(Paragraph("<br/>".join(lines), s_left))
             story.append(Spacer(1, 14))
 
