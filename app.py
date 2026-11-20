@@ -97,6 +97,7 @@ S = {
     "bullet": ParagraphStyle("Bullet", parent=_base["BodyText"], fontName="Helvetica", fontSize=9, leading=12.5, textColor=DARK, leftIndent=11, firstLineIndent=-7, spaceAfter=3),
     "job": ParagraphStyle("Job", parent=_base["BodyText"], fontName="Helvetica-Bold", fontSize=9.4, leading=13, textColor=DARK, spaceBefore=4, spaceAfter=2, keepWithNext=True),
     "detail": ParagraphStyle("Detail", parent=_base["BodyText"], fontName="Helvetica", fontSize=8.8, leading=12, textColor=SUBTITLE, spaceAfter=4),
+    "doctype": ParagraphStyle("DocType", parent=_base["Normal"], fontName="Helvetica-Bold", fontSize=12, leading=16, textColor=BLUE, alignment=TA_CENTER, spaceAfter=6),
     "ref": ParagraphStyle("Ref", parent=_base["BodyText"], fontName="Helvetica", fontSize=9, leading=12.5, textColor=DARK, spaceAfter=0),
 }
 
@@ -134,7 +135,7 @@ def make_pdf(cv):
     doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=19*mm, rightMargin=19*mm,
                             topMargin=16*mm, bottomMargin=17*mm,
                             title=f"{cv['name']} - Curriculum Vitae", author=cv["name"])
-    story = [Paragraph(esc(cv["name"].upper()), S["name"])]
+    story = [Paragraph("CURRICULUM VITAE", S["doctype"]), Paragraph(esc(cv["name"].upper()), S["name"])]
     if cv["headline"].strip():
         story.append(Paragraph(esc(cv["headline"]), S["headline"]))
     contact = [x for x in (cv["phone"], cv["email"], cv["location"], cv["linkedin"], cv["portfolio"]) if x.strip()]
@@ -438,6 +439,119 @@ def get_cv():
             "references": ss.references}
 
 
+def cv_preview_html(cv: dict) -> str:
+    """Paper-style CV preview that mirrors the PDF, with single line spacing (one line of HTML, no blank lines)."""
+    def t(x):
+        return escape(str(x or "").strip(), quote=False).replace("\n", "<br>")
+
+    h = ['<div style="background:#FFFFFF;color:#202A35;font-family:Helvetica,Arial,sans-serif;font-size:13px;'
+         'line-height:1.2;max-width:780px;margin:8px auto 24px;padding:40px 52px;border:1px solid #AAB7C7;'
+         'border-radius:4px;box-shadow:0 6px 20px rgba(23,54,93,0.18);">']
+
+    def heading(title):
+        h.append(f'<div style="font-size:14px;font-weight:700;color:#17365D;margin:16px 0 8px;">{t(title.upper())}</div>')
+
+    def para(text, extra=""):
+        h.append(f'<div style="margin-bottom:5px;{extra}">{t(text)}</div>')
+
+    def bullet(text):
+        h.append(f'<div style="padding-left:14px;text-indent:-9px;margin-bottom:4px;">&bull;&nbsp;{t(text)}</div>')
+
+    h.append('<div style="text-align:center;font-size:15px;font-weight:700;letter-spacing:1.5px;color:#2F5597;margin-bottom:8px;">CURRICULUM VITAE</div>')
+    h.append(f'<div style="text-align:center;font-size:26px;font-weight:700;color:#17365D;">{t(cv["name"].upper())}</div>')
+    if cv["headline"].strip():
+        h.append(f'<div style="text-align:center;font-weight:700;color:#2F5597;margin-top:4px;">{t(cv["headline"])}</div>')
+    contact = " | ".join(t(x) for x in (cv["phone"], cv["email"], cv["location"], cv["linkedin"], cv["portfolio"]) if x.strip())
+    if contact:
+        h.append(f'<div style="text-align:center;font-size:12px;margin-top:4px;">{contact}</div>')
+    h.append('<div style="border-top:2px solid #2F5597;margin:10px 0 4px;"></div>')
+
+    if cv["profile"].strip():
+        heading("Professional Profile")
+        para(cv["profile"])
+    if lines(cv["competencies"]):
+        heading("Core Competencies")
+        for x in lines(cv["competencies"]):
+            bullet(x)
+
+    exp = nonempty(cv["experience"], ["role", "organisation", "duties"])
+    if exp:
+        heading("Professional Experience")
+        for item in exp:
+            h.append(f'<div style="font-weight:700;margin-top:6px;margin-bottom:2px;">{t(item["role"])}</div>')
+            detail = " | ".join(t(x) for x in (item["organisation"], item["location"], item["dates"]) if x.strip())
+            if detail:
+                h.append(f'<div style="color:#3F4B59;font-size:12px;margin-bottom:4px;">{detail}</div>')
+            if item["summary"].strip():
+                para(item["summary"])
+            for duty in lines(item["duties"]):
+                bullet(duty)
+            h.append('<div style="height:6px;"></div>')
+
+    edu = nonempty(cv["education"], ["qualification", "institution"])
+    if edu:
+        heading("Education")
+        for item in edu:
+            h.append(f'<div style="font-weight:700;margin-top:4px;margin-bottom:2px;">{t(item["qualification"])}</div>')
+            detail = " | ".join(t(x) for x in (item["institution"], item["dates"], item["details"]) if x.strip())
+            if detail:
+                h.append(f'<div style="color:#3F4B59;font-size:12px;margin-bottom:4px;">{detail}</div>')
+
+    regs = nonempty(cv["registrations"], ["body", "licence_no", "certificate_no", "year", "valid_from", "valid_to"])
+    if regs:
+        heading("Professional Registration and Licensure")
+        for r in regs:
+            validity = " to ".join(x for x in (r["valid_from"], r["valid_to"]) if x.strip())
+            for label, value in (("Professional body", r["body"]), ("Licence number", r["licence_no"]),
+                                 ("Registration certificate number", r["certificate_no"]),
+                                 ("Year of registration", r["year"]), ("Licence validity", validity)):
+                if value.strip():
+                    para(f"{label}: {value}", "")
+            h.append('<div style="height:5px;"></div>')
+
+    certs = nonempty(cv["certifications"], ["name", "institution", "year"])
+    if certs:
+        heading("Certifications and Professional Development")
+        for c in certs:
+            h.append(f'<div style="font-weight:700;">{t(c["name"])}</div>')
+            detail = " | ".join(t(x) for x in (c["institution"], c["year"]) if x.strip())
+            if detail:
+                h.append(f'<div>{detail}</div>')
+            h.append('<div style="height:5px;"></div>')
+
+    pubs = nonempty(cv["publications"], ["authors", "title", "date", "apa"])
+    if pubs:
+        heading("Publications")
+        for p in pubs:
+            for label, key in (("Authors", "authors"), ("Title", "title"), ("Date of publication", "date"), ("APA reference", "apa")):
+                if p[key].strip():
+                    para(f"{label}: {p[key]}")
+            h.append('<div style="height:6px;"></div>')
+
+    if lines(cv["digital_skills"]):
+        heading("Digital and Technical Skills")
+        for x in lines(cv["digital_skills"]):
+            bullet(x)
+
+    langs = nonempty(cv["languages"], ["language", "level"])
+    if langs:
+        heading("Languages")
+        for item in langs:
+            para(f"{item['language'].strip()}: {item['level'].strip()}")
+
+    refs = nonempty(cv["references"], ["name", "title", "organisation", "phone", "email"])
+    if refs:
+        heading("Referees")
+        for r in refs:
+            parts = [t(x) for x in referee_lines(r)]
+            if r["name"].strip():
+                parts[0] = f"<b>{parts[0]}</b>"
+            h.append('<div style="margin-bottom:10px;">' + "<br>".join(parts) + "</div>")
+
+    h.append("</div>")
+    return "".join(h)
+
+
 def cv_page():
     init_state()
     st.button("🏠 Back to Home", key="top_home_cv", on_click=go, args=("home",))
@@ -478,69 +592,9 @@ def cv_page():
 
     with preview_tab:
         cv = get_cv()
-        st.subheader("CV content preview")
-        st.markdown(f"<h1 style='text-align:center;color:#17365D;margin-bottom:0'>{escape(cv['name'])}</h1>", unsafe_allow_html=True)
-        st.markdown(f"<p style='text-align:center;color:#2F5597;font-weight:700'>{escape(cv['headline'])}</p>", unsafe_allow_html=True)
-        contact = " | ".join(escape(x) for x in (cv["phone"], cv["email"], cv["location"], cv["linkedin"], cv["portfolio"]) if x.strip())
-        st.markdown(f"<p style='text-align:center;color:#202A35'>{contact}</p>", unsafe_allow_html=True)
-        st.divider()
-
-        def preview_section(title):
-            st.markdown(f"### {title}")
-
-        if cv["profile"].strip():
-            preview_section("PROFESSIONAL PROFILE"); st.write(cv["profile"])
-        if lines(cv["competencies"]):
-            preview_section("CORE COMPETENCIES")
-            for x in lines(cv["competencies"]): st.markdown(f"- {x}")
-        exp = nonempty(cv["experience"], ["role", "organisation", "duties"])
-        if exp:
-            preview_section("PROFESSIONAL EXPERIENCE")
-            for item in exp:
-                st.markdown(f"**{item['role']}**")
-                st.caption(" | ".join(x for x in (item["organisation"], item["location"], item["dates"]) if x.strip()))
-                if item["summary"].strip(): st.write(item["summary"])
-                for duty in lines(item["duties"]): st.markdown(f"- {duty}")
-        edu = nonempty(cv["education"], ["qualification", "institution"])
-        if edu:
-            preview_section("EDUCATION")
-            for item in edu:
-                st.markdown(f"**{item['qualification']}**")
-                st.write(" | ".join(x for x in (item["institution"], item["dates"], item["details"]) if x.strip()))
-        regs = nonempty(cv["registrations"], ["body", "licence_no", "certificate_no", "year", "valid_from", "valid_to"])
-        if regs:
-            preview_section("PROFESSIONAL REGISTRATION AND LICENSURE")
-            for r in regs:
-                for label, key in [("Professional body", "body"), ("Licence number", "licence_no"), ("Certificate number", "certificate_no"), ("Year of registration", "year")]:
-                    if r[key].strip(): st.write(f"**{label}:** {r[key]}")
-                validity = " to ".join(x for x in (r["valid_from"], r["valid_to"]) if x.strip())
-                if validity: st.write(f"**Licence validity:** {validity}")
-        certs = nonempty(cv["certifications"], ["name", "institution", "year"])
-        if certs:
-            preview_section("CERTIFICATIONS AND PROFESSIONAL DEVELOPMENT")
-            for c in certs:
-                st.markdown(f"**{c['name']}**"); st.write(" | ".join(x for x in (c["institution"], c["year"]) if x.strip()))
-        pubs = nonempty(cv["publications"], ["authors", "title", "date", "apa"])
-        if pubs:
-            preview_section("PUBLICATIONS")
-            for p in pubs:
-                for label, key in [("Authors", "authors"), ("Title", "title"), ("Date of publication", "date"), ("APA reference", "apa")]:
-                    if p[key].strip(): st.write(f"**{label}:** {p[key]}")
-        if lines(cv["digital_skills"]):
-            preview_section("DIGITAL AND TECHNICAL SKILLS")
-            for x in lines(cv["digital_skills"]): st.markdown(f"- {x}")
-        langs = nonempty(cv["languages"], ["language", "level"])
-        if langs:
-            preview_section("LANGUAGES")
-            for x in langs: st.write(f"**{x['language']}:** {x['level']}")
-        refs = nonempty(cv["references"], ["name", "title", "organisation", "phone", "email"])
-        if refs:
-            preview_section("REFEREES")
-            for r in refs:
-                parts = referee_lines(r)
-                if r["name"].strip():
-                    parts[0] = f"**{parts[0]}**"
-                st.markdown("  \n".join(parts))
+        st.subheader("Curriculum Vitae preview")
+        st.caption("This is how your CV will look. Go back to the first tab to make changes.")
+        st.markdown(cv_preview_html(cv), unsafe_allow_html=True)
 
         st.divider()
         st.subheader("Generate PDF")
@@ -683,6 +737,7 @@ def build_letter_pdf(d: dict) -> bytes:
         props.update(over)
         return ParagraphStyle(name, **props)
 
+    s_type = style("l_type", fontName="Helvetica-Bold", fontSize=12, leading=16, alignment=TA_CENTER, spaceAfter=6)
     s_name = style("l_name", fontName="Helvetica-Bold", fontSize=18, leading=22, alignment=TA_CENTER)
     s_sub = style("l_sub", alignment=TA_CENTER)
     s_left = style("l_left", alignment=TA_LEFT)
@@ -690,7 +745,7 @@ def build_letter_pdf(d: dict) -> bytes:
     s_re = style("l_re", fontName="Helvetica-Bold", alignment=TA_CENTER)
     s_body = style("l_body", alignment=TA_JUSTIFY, leading=16, spaceAfter=24)  # 1.5 line spacing after each paragraph
 
-    story = [Paragraph(safe_text(d["name"].upper()), s_name)]
+    story = [Paragraph(safe_text(d["letter_type"].upper()), s_type), Paragraph(safe_text(d["name"].upper()), s_name)]
     if d["headline"].strip():
         story.append(Paragraph(safe_text(d["headline"]), s_sub))
     contact = " | ".join(safe_text(x) for x in (d["phone"], d["email"], d["location"]) if x.strip())
@@ -747,6 +802,7 @@ def letter_preview_html(d: dict) -> str:
     h = ['<div style="background:#FFFFFF;color:#111111;font-family:Helvetica,Arial,sans-serif;font-size:14px;'
          'line-height:1.5;max-width:780px;margin:8px auto 24px;padding:44px 58px;border:1px solid #AAB7C7;'
          'border-radius:4px;box-shadow:0 6px 20px rgba(23,54,93,0.18);">']
+    h.append(f'<div style="text-align:center;font-size:15px;font-weight:700;letter-spacing:1.5px;color:#000000;margin-bottom:8px;">{t(d["letter_type"].upper())}</div>')
     h.append(f'<div style="text-align:center;font-size:24px;font-weight:700;line-height:1.25;color:#000000;">{t(d["name"].upper())}</div>')
     if d["headline"].strip():
         h.append(f'<div style="text-align:center;">{t(d["headline"])}</div>')
