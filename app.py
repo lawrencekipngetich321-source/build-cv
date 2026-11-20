@@ -1,444 +1,372 @@
 """
-Professional Letter Builder
-Run with: streamlit run app.py
+Professional Letter Builder (Streamlit)
+---------------------------------------
+Generates ATS-friendly, downloadable PDF letters:
+Cover Letter, Application Letter, Letter of Motivation,
+Statement of Purpose and Personal Statement.
 
-Dependencies:
-    pip install streamlit reportlab pillow
+Run locally:   streamlit run app.py
+Deploy:        push app.py + requirements.txt to GitHub, then deploy on Streamlit Community Cloud.
 """
 
-from datetime import date
-from io import BytesIO
+import io
 import re
+from datetime import datetime
+from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
+import numpy as np
 import streamlit as st
-from PIL import Image, ImageOps, ImageEnhance
+from PIL import Image, ImageFilter, ImageOps
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Image as RLImage,
-    KeepTogether, HRFlowable
-)
-from reportlab.pdfbase.pdfmetrics import stringWidth
-from xml.sax.saxutils import escape
-
-
-# -------------------------------------------------------------------
-# 1. PAGE CONFIGURATION AND DEFAULT CV HEADER DETAILS
-# -------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="Professional Letter Builder",
-    page_icon="✉️",
-    layout="wide"
+    HRFlowable,
+    Image as RLImage,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
 )
 
-DEFAULT_NAME = "KIPNGETICH LAWRENCE"
-DEFAULT_TITLE = "Registered Nurse | BSc Nursing and Public Health"
-DEFAULT_CONTACT = "+254 768 263 623 | Lawnetich15351@gmail.com | Kapsabet, Kenya"
+TIMEZONE = "Africa/Nairobi"
 
-LETTER_TYPES = [
-    "Cover Letter",
-    "Application Letter",
-    "Letter of Motivation",
-    "Statement of Purpose",
-    "Personal Statement",
-]
+# ----------------------------------------------------------------------------
+# Letter types: which sections are on by default for each one
+# ----------------------------------------------------------------------------
+LETTER_TYPES = {
+    "Cover Letter": {
+        "address": True,
+        "salutation": True,
+        "closing": True,
+        "re": "Application for the Position of Registered Nurse",
+        "hint": "Open with the role you are applying for, highlight 2-3 relevant achievements, "
+        "and close with a call to action.",
+    },
+    "Application Letter": {
+        "address": True,
+        "salutation": True,
+        "closing": True,
+        "re": "Application for the Position of Registered Nurse",
+        "hint": "State the position and where you saw it advertised, summarise your qualifications, "
+        "and request an interview.",
+    },
+    "Letter of Motivation": {
+        "address": True,
+        "salutation": True,
+        "closing": True,
+        "re": "Letter of Motivation for [Programme / Position]",
+        "hint": "Explain why you want this opportunity, what you bring, and how it fits your goals.",
+    },
+    "Statement of Purpose": {
+        "address": False,
+        "salutation": False,
+        "closing": False,
+        "re": "Statement of Purpose for [Programme]",
+        "hint": "Cover your academic/professional background, your goals, and why this "
+        "programme and institution are the right fit.",
+    },
+    "Personal Statement": {
+        "address": False,
+        "salutation": False,
+        "closing": False,
+        "re": "Personal Statement",
+        "hint": "Tell your story: motivation, key experiences, strengths and future aspirations.",
+    },
+}
 
 SALUTATIONS = [
     "Dear Hiring Manager,",
     "Dear Sir/Madam,",
-    "Dear [Recipient Name],",
+    "Dear Recruitment Officer,",
     "Dear Admissions Committee,",
-    "Dear Selection Committee,",
-    "To Whom It May Concern,",
-    "Custom salutation",
+    "Custom...",
 ]
+CLOSINGS = ["Yours faithfully,", "Yours sincerely,"]
 
 
-# -------------------------------------------------------------------
-# 2. HELPERS
-# -------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+def today_string() -> str:
+    """Today's date based on the current calendar date (Nairobi time)."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    return f"{now.day} {now:%B %Y}"
 
-def clean_text(value: str) -> str:
-    """Normalize user-entered text without changing its meaning."""
-    return (value or "").strip()
+
+def safe_text(value: str) -> str:
+    """Escape for ReportLab's mini-markup and normalise odd whitespace."""
+    value = (value or "").replace("\u00a0", " ").replace("\t", " ")
+    return escape(value.strip())
 
 
-def prepare_signature(uploaded_file):
+def process_signature(data: bytes) -> Image.Image:
     """
-    Prepare a legible black signature:
-    - correct image orientation
-    - convert to grayscale
-    - increase contrast
-    - remove light background
-    - crop to the visible ink with a small margin
-    Returns a PNG stream or None.
+    Turn a photo of a signature into a clean, black-on-transparent, tightly
+    cropped image: flattens uneven lighting, removes the paper background,
+    forces ink to black, then crops to the ink with a small margin.
     """
-    if uploaded_file is None:
-        return None
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+    if img.mode in ("RGBA", "LA", "P"):
+        rgba = img.convert("RGBA")
+        flat = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        flat.alpha_composite(rgba)
+        img = flat
+    gray = img.convert("L")
+    gray.thumbnail((1600, 1600))
 
-    try:
-        image = Image.open(uploaded_file)
-        image = ImageOps.exif_transpose(image).convert("RGB")
+    # Estimate paper background (handles shadows / uneven lighting)
+    w, h = gray.size
+    small = gray.resize((max(1, w // 8), max(1, h // 8)))
+    small = small.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(4))
+    background = np.asarray(small.resize((w, h), Image.BILINEAR), dtype=np.float32)
 
-        # White background and grayscale improve consistency in the PDF.
-        gray = ImageOps.grayscale(image)
-        gray = ImageEnhance.Contrast(gray).enhance(2.2)
+    pixels = np.asarray(gray, dtype=np.float32)
+    normalised = np.clip(pixels / np.maximum(background, 1.0) * 255.0, 0, 255)
+    ink = 255.0 - normalised
+    alpha = np.clip((ink - 35.0) * 4.0, 0, 255).astype(np.uint8)
 
-        # Turn dark signature strokes into black and background into white.
-        threshold = 205
-        bw = gray.point(lambda px: 0 if px < threshold else 255, mode="1").convert("L")
+    mask = alpha > 80
+    if not mask.any():
+        raise ValueError("No signature strokes detected. Use a dark pen on white paper.")
 
-        # Find the ink area. The signature is expected to be darker than paper.
-        inverted = ImageOps.invert(bw)
-        bbox = inverted.point(lambda px: 255 if px > 0 else 0).getbbox()
+    ys, xs = np.where(mask)
+    pad_x = max(4, int((xs.max() - xs.min()) * 0.04))
+    pad_y = max(4, int((ys.max() - ys.min()) * 0.10))
+    x0, x1 = max(0, xs.min() - pad_x), min(w, xs.max() + pad_x + 1)
+    y0, y1 = max(0, ys.min() - pad_y), min(h, ys.max() + pad_y + 1)
 
-        if bbox:
-            left, top, right, bottom = bbox
-            pad_x = max(12, int((right - left) * 0.06))
-            pad_y = max(10, int((bottom - top) * 0.18))
-            left = max(0, left - pad_x)
-            top = max(0, top - pad_y)
-            right = min(bw.width, right + pad_x)
-            bottom = min(bw.height, bottom + pad_y)
-            bw = bw.crop((left, top, right, bottom))
-
-        # Keep the signature crisp and reasonably sized.
-        if bw.width > 1600:
-            new_height = int(bw.height * (1600 / bw.width))
-            bw = bw.resize((1600, new_height), Image.Resampling.LANCZOS)
-
-        output = BytesIO()
-        bw.save(output, format="PNG", optimize=True)
-        output.seek(0)
-        return output
-    except Exception:
-        return None
+    out = np.zeros((h, w, 4), dtype=np.uint8)  # black ink, variable alpha
+    out[..., 3] = alpha
+    return Image.fromarray(out, "RGBA").crop((x0, y0, x1, y1))
 
 
-def paragraph_text(text: str) -> str:
-    """Escape plain text safely for ReportLab Paragraph markup."""
-    return escape(text).replace("\n", "<br/>")
+def image_to_png_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
-def build_pdf(data: dict, signature_stream: BytesIO | None) -> bytes:
-    """Create a clean, ATS-friendly A4 PDF letter."""
-    output = BytesIO()
-
+def build_pdf(d: dict) -> bytes:
+    """Build the letter PDF. Uses real text and standard fonts, so ATS can parse it."""
+    buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        output,
+        buf,
         pagesize=A4,
-        rightMargin=25 * mm,
-        leftMargin=25 * mm,
-        topMargin=17 * mm,
-        bottomMargin=20 * mm,
-        title=f"{data['letter_type']} - {data['sender_name']}",
-        author=data["sender_name"],
-        subject=data["subject"],
+        leftMargin=2.2 * cm,
+        rightMargin=2.2 * cm,
+        topMargin=1.8 * cm,
+        bottomMargin=1.8 * cm,
+        title=f"{d['letter_type']} - {d['name']}",
+        author=d["name"],
     )
 
-    styles = getSampleStyleSheet()
-    header_name = ParagraphStyle(
-        "HeaderName", parent=styles["Normal"], fontName="Helvetica-Bold",
-        fontSize=15, leading=18, alignment=TA_CENTER, spaceAfter=3
-    )
-    header_title = ParagraphStyle(
-        "HeaderTitle", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=9.5, leading=12, alignment=TA_CENTER, spaceAfter=2
-    )
-    header_contact = ParagraphStyle(
-        "HeaderContact", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=8.5, leading=11, alignment=TA_CENTER, spaceAfter=7
-    )
-    date_style = ParagraphStyle(
-        "Date", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=10, leading=14, alignment=TA_LEFT, spaceAfter=10
-    )
-    address_style = ParagraphStyle(
-        "Address", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=10, leading=14, alignment=TA_LEFT, spaceAfter=0
-    )
-    subject_style = ParagraphStyle(
-        "Subject", parent=styles["Normal"], fontName="Helvetica-Bold",
-        fontSize=11, leading=15, alignment=TA_CENTER,
-        spaceBefore=12, spaceAfter=12
-    )
-    salutation_style = ParagraphStyle(
-        "Salutation", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=10.5, leading=15, alignment=TA_LEFT, spaceAfter=9
-    )
-    body_style = ParagraphStyle(
-        "Body", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=10.5, leading=16, alignment=TA_JUSTIFY,
-        spaceAfter=9, allowWidows=0, allowOrphans=0
-    )
-    closing_style = ParagraphStyle(
-        "Closing", parent=styles["Normal"], fontName="Helvetica",
-        fontSize=10.5, leading=15, alignment=TA_LEFT
-    )
-    name_style = ParagraphStyle(
-        "SenderName", parent=styles["Normal"], fontName="Helvetica-Bold",
-        fontSize=10.5, leading=14, alignment=TA_LEFT, spaceBefore=3
-    )
+    def style(name, **over):
+        props = dict(fontName="Helvetica", fontSize=10.5, leading=15, textColor=colors.black)
+        props.update(over)
+        return ParagraphStyle(name, **props)
+
+    s_name = style("name", fontName="Helvetica-Bold", fontSize=18, leading=22, alignment=TA_CENTER)
+    s_sub = style("sub", alignment=TA_CENTER)
+    s_left = style("left", alignment=TA_LEFT)
+    s_bold = style("bold", fontName="Helvetica-Bold", alignment=TA_LEFT)
+    s_re = style("re", fontName="Helvetica-Bold", alignment=TA_CENTER)
+    s_body = style("body", alignment=TA_JUSTIFY, spaceAfter=9)
 
     story = []
 
-    # Centered CV-style identity header.
-    story.append(Paragraph(paragraph_text(data["sender_name"].upper()), header_name))
-    if data["sender_title"]:
-        story.append(Paragraph(paragraph_text(data["sender_title"]), header_title))
-    if data["sender_contact"]:
-        story.append(Paragraph(paragraph_text(data["sender_contact"]), header_contact))
-    story.append(HRFlowable(
-        width="100%", thickness=0.6, color=colors.HexColor("#777777"),
-        spaceBefore=1, spaceAfter=12
-    ))
+    # Header (centred, same details as the CV)
+    story.append(Paragraph(safe_text(d["name"]).upper(), s_name))
+    if d["headline"]:
+        story.append(Paragraph(safe_text(d["headline"]), s_sub))
+    contact = " | ".join(safe_text(x) for x in (d["phone"], d["email"], d["location"]) if x.strip())
+    if contact:
+        story.append(Paragraph(contact, s_sub))
+    story.append(Spacer(1, 6))
+    story.append(HRFlowable(width="100%", thickness=0.8, color=colors.black, spaceAfter=14))
 
-    # Automatically populated date, formatted in a professional style.
-    story.append(Paragraph(data["date"].strftime("%d %B %Y"), date_style))
+    # Date
+    story.append(Paragraph(safe_text(d["date"]), s_left))
+    story.append(Spacer(1, 12))
 
-    # Recipient address: each entry is a separate line, aligned left.
-    address_lines = [
-        "<b>TO,</b>",
-        paragraph_text(data["recipient_name"]),
-        paragraph_text(data["institution"]),
-        paragraph_text(data["recipient_address"]),
-        paragraph_text(data["city_state"]),
-    ]
-    address_lines = [line for line in address_lines if line]
-    story.append(Paragraph("<br/>".join(address_lines), address_style))
-    story.append(Spacer(1, 8))
+    # Recipient address block (left, one entry per line)
+    if d["include_address"]:
+        lines = ["To,"] + [
+            safe_text(x)
+            for x in (d["rec_name"], d["rec_institution"], d["rec_address"], d["rec_city"])
+            if x.strip()
+        ]
+        if len(lines) > 1:
+            story.append(Paragraph("<br/>".join(lines), s_left))
+            story.append(Spacer(1, 14))
 
-    # Centered RE line.
-    story.append(Paragraph(
-        f"RE: {paragraph_text(data['subject'])}",
-        subject_style
-    ))
+    # Salutation
+    if d["include_salutation"] and d["salutation"].strip():
+        story.append(Paragraph(safe_text(d["salutation"]), s_left))
+        story.append(Spacer(1, 10))
 
-    story.append(Paragraph(paragraph_text(data["salutation"]), salutation_style))
+    # RE: line (centred)
+    if d["re_line"].strip():
+        story.append(Paragraph(f"RE: {safe_text(d['re_line']).upper()}", s_re))
+        story.append(Spacer(1, 12))
 
-    # Body is split into paragraphs on blank lines and justified.
-    body_paragraphs = [
-        part.strip() for part in re.split(r"\n\s*\n", data["body"].strip())
-        if part.strip()
-    ]
-    for part in body_paragraphs:
-        # Preserve intentional single line breaks inside a paragraph.
-        story.append(Paragraph(paragraph_text(part), body_style))
+    # Body (justified / block); blank line = new paragraph
+    paragraphs = [p for p in re.split(r"\n\s*\n", d["body"].strip()) if p.strip()]
+    for p in paragraphs:
+        story.append(Paragraph("<br/>".join(safe_text(line) for line in p.split("\n")), s_body))
 
-    story.append(Spacer(1, 7))
-    closing_items = [Paragraph(paragraph_text(data["closing"]), closing_style)]
+    # Closing block: Yours faithfully -> signature -> name -> title
+    if d["include_closing"]:
+        block = [Spacer(1, 8), Paragraph(safe_text(d["closing"]), s_left), Spacer(1, 6)]
+        if d["signature_png"]:
+            with Image.open(io.BytesIO(d["signature_png"])) as im:
+                iw, ih = im.size
+            scale = min((5.5 * cm) / iw, (2.2 * cm) / ih)
+            sig = RLImage(io.BytesIO(d["signature_png"]), width=iw * scale, height=ih * scale)
+            sig.hAlign = "LEFT"
+            block.append(sig)
+        else:
+            block.append(Spacer(1, 1.6 * cm))
+        block.append(Spacer(1, 4))
+        block.append(Paragraph(safe_text(d["sign_name"]), s_bold))
+        if d["sign_title"].strip():
+            block.append(Paragraph(safe_text(d["sign_title"]), s_left))
+        story.append(KeepTogether(block))
 
-    if signature_stream is not None:
-        signature_stream.seek(0)
-        # Image is kept within a modest signature area and preserves aspect ratio.
-        signature_image = Image.open(signature_stream)
-        max_w, max_h = 43 * mm, 19 * mm
-        scale = min(max_w / signature_image.width, max_h / signature_image.height, 1.0)
-        draw_w = signature_image.width * scale
-        draw_h = signature_image.height * scale
-        signature_stream.seek(0)
-        closing_items.append(Spacer(1, 2))
-        closing_items.append(RLImage(signature_stream, width=draw_w, height=draw_h))
-    else:
-        closing_items.append(Spacer(1, 18))
+    doc.build(story)
+    return buf.getvalue()
 
-    closing_items.append(Paragraph(paragraph_text(data.get("closing_name", data["sender_name"])), name_style))
-    if data["sender_title"]:
-        closing_items.append(Paragraph(paragraph_text(data["sender_title"]), closing_style))
 
-    story.append(KeepTogether(closing_items))
+# ----------------------------------------------------------------------------
+# UI
+# ----------------------------------------------------------------------------
+def main() -> None:
+    st.set_page_config(page_title="Letter Builder", page_icon="✉️", layout="centered")
+    st.title("✉️ Professional Letter Builder")
+    st.caption("Create an ATS-friendly letter and download it as a PDF.")
 
-    def add_page_number(canvas, document):
-        canvas.saveState()
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(colors.HexColor("#666666"))
-        canvas.drawRightString(
-            A4[0] - 25 * mm, 10 * mm, f"Page {document.page}"
+    letter_type = st.selectbox("Letter type", list(LETTER_TYPES), key="letter_type")
+    cfg = LETTER_TYPES[letter_type]
+    k = letter_type.replace(" ", "_")  # per-type widget keys so defaults refresh on change
+
+    # --- Personal details (header) -----------------------------------------
+    st.subheader("1. Your details (letter heading)")
+    name = st.text_input("Full name", "Kipngetich Lawrence", key="name")
+    headline = st.text_input(
+        "Professional headline",
+        "Registered Nurse | BSc Nursing and Public Health",
+        key="headline",
+    )
+    c1, c2, c3 = st.columns(3)
+    phone = c1.text_input("Phone", "+254 768 263 623", key="phone")
+    email = c2.text_input("Email", "Lawnetich15351@gmail.com", key="email")
+    location = c3.text_input("Location", "Kapsabet, Kenya", key="location")
+
+    # --- Date ---------------------------------------------------------------
+    st.subheader("2. Date")
+    date_str = today_string()
+    st.text_input("Date (automatic, today's date)", date_str, disabled=True)
+
+    # --- Recipient ----------------------------------------------------------
+    st.subheader("3. Recipient address")
+    include_address = st.checkbox("Include recipient address", cfg["address"], key=f"addr_{k}")
+    rec_name = rec_institution = rec_address = rec_city = ""
+    if include_address:
+        rec_name = st.text_input("Name of person addressed", key=f"rn_{k}")
+        rec_institution = st.text_input("Institution", key=f"ri_{k}")
+        rec_address = st.text_input("Address", key=f"ra_{k}")
+        rec_city = st.text_input("City / State", key=f"rc_{k}")
+
+    # --- Salutation ---------------------------------------------------------
+    st.subheader("4. Salutation")
+    include_salutation = st.checkbox("Include salutation", cfg["salutation"], key=f"sal_on_{k}")
+    salutation = ""
+    if include_salutation:
+        choice = st.selectbox("Salutation", SALUTATIONS, key=f"sal_{k}")
+        salutation = (
+            st.text_input("Custom salutation", "Dear Dr. ...,", key=f"sal_c_{k}")
+            if choice == "Custom..."
+            else choice
         )
-        canvas.restoreState()
 
-    doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
-    output.seek(0)
-    return output.getvalue()
+    # --- RE line ------------------------------------------------------------
+    st.subheader("5. RE: (subject line)")
+    re_line = st.text_input("Subject (printed centred after 'RE:')", cfg["re"], key=f"re_{k}")
 
+    # --- Body ---------------------------------------------------------------
+    st.subheader("6. Body")
+    st.caption(cfg["hint"] + " Leave a blank line between paragraphs.")
+    body = st.text_area("Letter body", height=320, key=f"body_{k}")
 
-# -------------------------------------------------------------------
-# 3. USER INTERFACE
-# -------------------------------------------------------------------
+    # --- Closing ------------------------------------------------------------
+    st.subheader("7. Closing and signature")
+    include_closing = st.checkbox("Include closing and signature", cfg["closing"], key=f"clo_on_{k}")
+    closing, sign_name, sign_title, signature_png = "", name, "", None
+    if include_closing:
+        default_closing = 1 if salutation and not re.search(
+            r"sir|madam|hiring|recruitment|committee", salutation, re.I
+        ) else 0
+        closing = st.selectbox("Closing", CLOSINGS, index=default_closing, key=f"cl_{k}_{salutation}")
 
-st.title("Professional Letter Builder")
-st.caption(
-    "Create a clean, professional and ATS-friendly letter, then download it as a PDF."
-)
+        sig_file = st.file_uploader(
+            "Upload signature (photo of a black-ink signature on white paper)",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="sig",
+        )
+        if sig_file is not None:
+            try:
+                sig_img = process_signature(sig_file.getvalue())
+                signature_png = image_to_png_bytes(sig_img)
+                st.image(signature_png, caption="Cleaned and cropped signature", width=220)
+            except Exception as exc:  # noqa: BLE001 - show friendly message to the user
+                st.error(f"Could not process the signature: {exc}")
 
-with st.sidebar:
-    st.header("Letter type")
-    letter_type = st.selectbox("Choose the document", LETTER_TYPES, index=0)
-    st.caption("The selected type is used in the PDF document metadata.")
+        sign_name = st.text_input("Name (printed under signature)", name, key=f"sn_{name}")
+        sign_title = st.text_input(
+            "Title (below name)", "Registered Nurse", key=f"st_{k}"
+        )
 
+    # --- Generate -----------------------------------------------------------
     st.divider()
-    st.header("Your CV header")
-    sender_name = st.text_input("Your full name", value=DEFAULT_NAME)
-    sender_title = st.text_input("Professional title / qualification", value=DEFAULT_TITLE)
-    sender_contact = st.text_input("Phone | Email | Location", value=DEFAULT_CONTACT)
+    problems = []
+    if not name.strip():
+        problems.append("Enter your full name.")
+    if not body.strip():
+        problems.append("Write the body of the letter.")
+    if include_closing and not sign_name.strip():
+        problems.append("Enter the name for the signature block.")
+    for p in problems:
+        st.warning(p)
 
-    st.info(
-        "The name, professional title and contact details are prefilled from "
-        "the CV provided. You can edit them before generating the letter."
-    )
+    if not problems:
+        try:
+            pdf_bytes = build_pdf(
+                dict(
+                    letter_type=letter_type, name=name, headline=headline, phone=phone,
+                    email=email, location=location, date=date_str,
+                    include_address=include_address, rec_name=rec_name,
+                    rec_institution=rec_institution, rec_address=rec_address, rec_city=rec_city,
+                    include_salutation=include_salutation, salutation=salutation,
+                    re_line=re_line, body=body, include_closing=include_closing,
+                    closing=closing, signature_png=signature_png,
+                    sign_name=sign_name, sign_title=sign_title,
+                )
+            )
+            file_name = re.sub(r"[^A-Za-z0-9]+", "_", f"{name}_{letter_type}").strip("_") + ".pdf"
+            st.download_button(
+                "⬇️ Download PDF",
+                data=pdf_bytes,
+                file_name=file_name,
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not create the PDF: {exc}")
 
-left, right = st.columns([1, 1], gap="large")
 
-with left:
-    st.subheader("1. Recipient details")
-    current_date = date.today()
-    st.date_input(
-        "Date",
-        value=current_date,
-        disabled=True,
-        help="Automatically uses your computer's current calendar date."
-    )
-
-    recipient_name = st.text_input(
-        "Name of person addressed to",
-        placeholder="e.g. Dr. Jane Doe"
-    )
-    institution = st.text_input(
-        "Institution / organization",
-        placeholder="e.g. County Referral Hospital"
-    )
-    recipient_address = st.text_input(
-        "Recipient's address",
-        placeholder="e.g. P.O. Box 123-50200"
-    )
-    city_state = st.text_input(
-        "City / State",
-        placeholder="e.g. Bungoma, Kenya"
-    )
-
-    st.subheader("2. Subject / RE")
-    subject = st.text_input(
-        "RE: (enter the purpose of the letter)",
-        placeholder="e.g. APPLICATION FOR THE POSITION OF REGISTERED NURSE"
-    )
-
-with right:
-    st.subheader("3. Salutation")
-    salutation_choice = st.selectbox("Choose salutation", SALUTATIONS, index=0)
-    if salutation_choice == "Custom salutation":
-        salutation = st.text_input(
-            "Enter your salutation",
-            placeholder="Dear Hiring Manager,"
-        )
-    elif salutation_choice == "Dear [Recipient Name],":
-        salutation = f"Dear {recipient_name}," if recipient_name else "Dear Recipient,"
-    else:
-        salutation = salutation_choice
-
-    st.subheader("4. Letter body")
-    st.caption(
-        "Write in paragraphs. Leave one blank line between paragraphs. "
-        "The PDF will use justified block alignment."
-    )
-    body = st.text_area(
-        "Body of the letter",
-        height=330,
-        placeholder=(
-            "Paragraph 1: Introduce yourself and state the purpose of the letter.\n\n"
-            "Paragraph 2: Explain your relevant qualifications, experience and skills.\n\n"
-            "Paragraph 3: Explain your motivation, suitability and/or intended contribution.\n\n"
-            "Final paragraph: Thank the recipient and state your availability for further discussion."
-        )
-    )
-
-st.divider()
-st.subheader("5. Closing and signature")
-
-close_col, sign_col = st.columns([1, 1], gap="large")
-with close_col:
-    closing = st.selectbox(
-        "Closing phrase",
-        ["Yours sincerely,", "Yours faithfully,", "Kind regards,"],
-        index=0
-    )
-    signature_name = st.text_input(
-        "Name below signature",
-        value=sender_name
-    )
-
-with sign_col:
-    signature_upload = st.file_uploader(
-        "Upload signature image (PNG, JPG or JPEG)",
-        type=["png", "jpg", "jpeg"],
-        help="A clear image of a handwritten signature on a plain, light background works best."
-    )
-    signature_stream = prepare_signature(signature_upload) if signature_upload else None
-
-    if signature_upload and signature_stream:
-        st.image(signature_stream, caption="Signature preview (cropped and cleaned)", width=280)
-        signature_stream.seek(0)
-    elif signature_upload:
-        st.warning("The signature image could not be processed. Try a clearer PNG or JPG image.")
-
-st.divider()
-
-# -------------------------------------------------------------------
-# 4. VALIDATION AND PDF DOWNLOAD
-# -------------------------------------------------------------------
-
-required_fields = {
-    "Your full name": sender_name,
-    "Recipient name": recipient_name,
-    "Institution": institution,
-    "Recipient address": recipient_address,
-    "City / State": city_state,
-    "RE / subject": subject,
-    "Salutation": salutation,
-    "Letter body": body,
-    "Name below signature": signature_name,
-}
-missing = [label for label, value in required_fields.items() if not clean_text(value)]
-
-preview_data = {
-    "letter_type": letter_type,
-    "sender_name": clean_text(sender_name),
-    "sender_title": clean_text(sender_title),
-    "sender_contact": clean_text(sender_contact),
-    "date": current_date,
-    "recipient_name": clean_text(recipient_name),
-    "institution": clean_text(institution),
-    "recipient_address": clean_text(recipient_address),
-    "city_state": clean_text(city_state),
-    "subject": clean_text(subject),
-    "salutation": clean_text(salutation),
-    "body": clean_text(body),
-    "closing": clean_text(closing),
-    "closing_name": clean_text(signature_name),
-}
-
-if missing:
-    st.info("Complete the following fields to enable PDF generation: " + ", ".join(missing))
-else:
-    try:
-        pdf_bytes = build_pdf(preview_data, signature_stream)
-        st.download_button(
-            label="Download professional letter (PDF)",
-            data=pdf_bytes,
-            file_name=f"{letter_type.lower().replace(' ', '_')}.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True
-        )
-        st.success("Your PDF is ready. Review the downloaded document before sending it.")
-    except Exception as exc:
-        st.error(f"PDF generation failed: {exc}")
-        st.caption("Check the entered content and uploaded signature, then try again.")
-
-st.caption(
-    "ATS-friendly formatting: selectable text, standard fonts, clear headings, "
-    "simple layout and no decorative columns or text boxes in the PDF."
-)
+if __name__ == "__main__":
+    main()
