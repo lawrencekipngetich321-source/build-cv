@@ -174,7 +174,7 @@ def build_pdf(d: dict) -> bytes:
     s_left = style("left", alignment=TA_LEFT)
     s_bold = style("bold", fontName="Helvetica-Bold", alignment=TA_LEFT)
     s_re = style("re", fontName="Helvetica-Bold", alignment=TA_CENTER)
-    s_body = style("body", alignment=TA_JUSTIFY, leading=16, spaceAfter=24)  # 1.5 line spacing after each paragraph
+    s_body = style("body", alignment=TA_JUSTIFY, leading=16, spaceAfter=20)  # 1.5 line spacing after each paragraph
 
     story = []
 
