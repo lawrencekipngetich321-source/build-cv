@@ -174,7 +174,7 @@ def build_pdf(d: dict) -> bytes:
     s_left = style("left", alignment=TA_LEFT)
     s_bold = style("bold", fontName="Helvetica-Bold", alignment=TA_LEFT)
     s_re = style("re", fontName="Helvetica-Bold", alignment=TA_CENTER)
-    s_body = style("body", alignment=TA_JUSTIFY, spaceAfter=9)
+    s_body = style("body", alignment=TA_JUSTIFY, leading=16, spaceAfter=16)
 
     story = []
 
@@ -224,12 +224,12 @@ def build_pdf(d: dict) -> bytes:
         if d["signature_png"]:
             with Image.open(io.BytesIO(d["signature_png"])) as im:
                 iw, ih = im.size
-            scale = min((5.5 * cm) / iw, (2.2 * cm) / ih)
+            scale = min((3.2 * cm) / iw, (1.3 * cm) / ih)
             sig = RLImage(io.BytesIO(d["signature_png"]), width=iw * scale, height=ih * scale)
             sig.hAlign = "LEFT"
             block.append(sig)
         else:
-            block.append(Spacer(1, 1.6 * cm))
+            block.append(Spacer(1, 1.0 * cm))
         block.append(Spacer(1, 4))
         block.append(Paragraph(safe_text(d["sign_name"]), s_bold))
         if d["sign_title"].strip():
