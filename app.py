@@ -291,7 +291,12 @@ def make_pdf(cv):
                     block.append(Paragraph(f"<b>{label}:</b>", S["label"]))
                     block.extend(bullet_para(p) for p in points)
             block.append(Spacer(1, 6))
-            story.append(KeepTogether(block))
+            # Keep only the top of each job together (title, details, first bullet) so the rest can
+            # flow onto the next page instead of leaving a large blank gap at the bottom of a page.
+            first_bullet = next((n for n, f in enumerate(block) if getattr(f, "style", None) is S["bullet"]), None)
+            cut = len(block) if first_bullet is None else first_bullet + 1
+            story.append(KeepTogether(block[:cut]))
+            story.extend(block[cut:])
 
     edu = nonempty(cv["education"], ["qualification", "institution"])
     if edu:
