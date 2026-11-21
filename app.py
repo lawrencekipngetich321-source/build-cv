@@ -282,7 +282,7 @@ def make_pdf(cv):
             block = [heading]
             if detail:
                 block.append(Paragraph(detail, S["detail"]))
-            for label, key in (("Hospital description", "hospital"), ("Project", "summary")):
+            for label, key in (("Institution description", "hospital"), ("Project", "summary")):
                 if item.get(key, "").strip():
                     block.append(Paragraph(f"<b>{label}:</b> {esc(item[key])}", S["body"]))
             for label, key in (("Responsibilities", "duties"), ("Achievements", "achievements")):
@@ -444,7 +444,7 @@ def edit_experience():
             a, b = st.columns(2)
             item["location"] = a.text_input("Location", item["location"], key=f"ex_loc_{uid}")
             item["dates"] = b.text_input("Dates", item["dates"], key=f"ex_dates_{uid}")
-            item["hospital"] = st.text_area("Hospital description (optional)", item["hospital"], key=f"ex_hosp_{uid}", height=90)
+            item["hospital"] = st.text_area("Institution description (optional)", item["hospital"], key=f"ex_hosp_{uid}", height=90)
             item["summary"] = st.text_input("Project (optional)", item["summary"], key=f"ex_summary_{uid}")
             item["duties"] = st.text_area("Responsibilities", item["duties"], key=f"ex_duties_{uid}", height=140)
             item["achievements"] = st.text_area("Achievements (optional)", item["achievements"], key=f"ex_ach_{uid}", height=110)
@@ -620,7 +620,7 @@ def cv_preview_html(cv: dict) -> str:
             detail = " | ".join(t(x) for x in (item["organisation"], item["location"], item["dates"]) if x.strip())
             if detail:
                 h.append(f'<div style="margin-bottom:6pt;">{detail}</div>')
-            for label, key in (("Hospital description", "hospital"), ("Project", "summary")):
+            for label, key in (("Institution description", "hospital"), ("Project", "summary")):
                 if item.get(key, "").strip():
                     h.append(f'<div style="text-align:justify;margin-bottom:6pt;"><b>{label}:</b> {t(item[key])}</div>')
             for label, key in (("Responsibilities", "duties"), ("Achievements", "achievements")):
