@@ -16,6 +16,7 @@ import io
 import re
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -26,6 +27,8 @@ from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     HRFlowable,
     Image as RLImage,
@@ -33,6 +36,8 @@ from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
     Spacer,
+    Table,
+    TableStyle,
 )
 
 st.set_page_config(page_title="Career Document Studio", page_icon="📄", layout="wide")
@@ -40,11 +45,73 @@ st.set_page_config(page_title="Career Document Studio", page_icon="📄", layout
 # =============================================================================
 # SHARED: colours, navigation and state persistence
 # =============================================================================
-NAVY = colors.HexColor("#17365D")
-BLUE = colors.HexColor("#2F5597")
-DARK = colors.HexColor("#202A35")
-SUBTITLE = colors.HexColor("#3F4B59")
-LINE = colors.HexColor("#AAB7C7")
+NAVY = colors.HexColor("#1B365D")   # name, section headers, divider lines
+SLATE = colors.HexColor("#333333")  # body text (softer than pure black)
+
+# ---- Fonts: Cambria -> Caladea (metric-compatible with Cambria) -> Times --------
+# Cambria is a Microsoft font and is not bundled. Put cambria.ttf, cambriab.ttf, cambriai.ttf and
+# cambriaz.ttf in a "fonts" folder next to app.py (or install them on the machine) to use it.
+FONT_SEARCH_DIRS = [
+    Path(__file__).resolve().parent / "fonts",
+    Path.home() / ".fonts",
+    Path("C:/Windows/Fonts"),
+    Path("/Library/Fonts"),
+    Path("/System/Library/Fonts/Supplemental"),
+    Path("/usr/share/fonts"),
+    Path("/usr/local/share/fonts"),
+]
+FONT_FAMILIES = [
+    ("Cambria", {"regular": ["cambria.ttc", "cambria.ttf"], "bold": ["cambriab.ttf"],
+                 "italic": ["cambriai.ttf"], "bolditalic": ["cambriaz.ttf"]}),
+    ("Caladea (Cambria-compatible)", {"regular": ["caladea-regular.ttf"], "bold": ["caladea-bold.ttf"],
+                                      "italic": ["caladea-italic.ttf"], "bolditalic": ["caladea-bolditalic.ttf"]}),
+]
+
+
+def _index_fonts() -> dict:
+    found = {}
+    for base in FONT_SEARCH_DIRS:
+        try:
+            if base.is_dir():
+                for p in base.rglob("*"):
+                    if p.suffix.lower() in (".ttf", ".ttc"):
+                        found.setdefault(p.name.lower(), p)
+        except OSError:
+            continue
+    return found
+
+
+def setup_fonts():
+    """Return (regular, bold, italic, bold-italic, label) font names for the PDFs."""
+    if "AppSerif" in pdfmetrics.getRegisteredFontNames():
+        face = str(pdfmetrics.getFont("AppSerif").face.name).lower()
+        label = "Cambria" if "cambria" in face else "Caladea (Cambria-compatible)" if "caladea" in face else face
+        return "AppSerif", "AppSerif-Bold", "AppSerif-Italic", "AppSerif-BoldItalic", label
+    index = _index_fonts()
+
+    def pick(names):
+        return next((index[n] for n in names if n in index), None)
+
+    for label, files in FONT_FAMILIES:
+        paths = {style: pick(names) for style, names in files.items()}
+        if not (paths["regular"] and paths["bold"]):
+            continue
+        try:
+            for style, suffix in (("regular", ""), ("bold", "-Bold"), ("italic", "-Italic"), ("bolditalic", "-BoldItalic")):
+                path = paths[style] or paths["bold" if "bold" in style else "regular"]
+                pdfmetrics.registerFont(TTFont(f"AppSerif{suffix}", str(path), subfontIndex=0))
+            pdfmetrics.registerFontFamily("AppSerif", normal="AppSerif", bold="AppSerif-Bold",
+                                          italic="AppSerif-Italic", boldItalic="AppSerif-BoldItalic")
+            return "AppSerif", "AppSerif-Bold", "AppSerif-Italic", "AppSerif-BoldItalic", label
+        except Exception:  # unreadable font file: try the next family
+            continue
+    return "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic", "Times (Cambria not found)"
+
+
+FONT, FONT_BOLD, FONT_ITALIC, FONT_BOLDITALIC, FONT_LABEL = setup_fonts()
+BODY_SIZE = 12      # body text size
+BODY_LEADING = 14.4  # single line spacing for 12 pt
+BODY_AFTER = 6      # space after every paragraph (pt)
 
 TIMEZONE = "Africa/Nairobi"
 
@@ -88,17 +155,27 @@ def rec(d: dict) -> dict:
 # CV BUILDER - PDF
 # =============================================================================
 _base = getSampleStyleSheet()
+
+
+def _ps(name, **over):
+    props = dict(parent=_base["Normal"], fontName=FONT, fontSize=BODY_SIZE, leading=BODY_LEADING,
+                 textColor=SLATE, alignment=TA_LEFT, spaceBefore=0, spaceAfter=0)
+    props.update(over)
+    return ParagraphStyle(name, **props)
+
+
 S = {
-    "name": ParagraphStyle("Name", parent=_base["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=NAVY, alignment=TA_CENTER, spaceAfter=3),
-    "headline": ParagraphStyle("Headline", parent=_base["Normal"], fontName="Helvetica-Bold", fontSize=10.5, leading=14, textColor=BLUE, alignment=TA_CENTER, spaceAfter=5),
-    "contact": ParagraphStyle("Contact", parent=_base["Normal"], fontName="Helvetica", fontSize=8.5, leading=12, textColor=DARK, alignment=TA_CENTER, spaceAfter=8),
-    "section": ParagraphStyle("Section", parent=_base["Heading2"], fontName="Helvetica-Bold", fontSize=10.5, leading=14, textColor=NAVY, alignment=TA_LEFT, spaceBefore=12, spaceAfter=7, keepWithNext=True),
-    "body": ParagraphStyle("Body", parent=_base["BodyText"], fontName="Helvetica", fontSize=9.2, leading=13, textColor=DARK, spaceAfter=4),
-    "bullet": ParagraphStyle("Bullet", parent=_base["BodyText"], fontName="Helvetica", fontSize=9, leading=12.5, textColor=DARK, leftIndent=11, firstLineIndent=-7, spaceAfter=3),
-    "job": ParagraphStyle("Job", parent=_base["BodyText"], fontName="Helvetica-Bold", fontSize=9.4, leading=13, textColor=DARK, spaceBefore=4, spaceAfter=2, keepWithNext=True),
-    "detail": ParagraphStyle("Detail", parent=_base["BodyText"], fontName="Helvetica", fontSize=8.8, leading=12, textColor=SUBTITLE, spaceAfter=4),
-    "doctype": ParagraphStyle("DocType", parent=_base["Normal"], fontName="Helvetica-Bold", fontSize=12, leading=16, textColor=BLUE, alignment=TA_CENTER, spaceAfter=6),
-    "ref": ParagraphStyle("Ref", parent=_base["BodyText"], fontName="Helvetica", fontSize=9, leading=12.5, textColor=DARK, spaceAfter=0),
+    "doctype": _ps("DocType", fontName=FONT_BOLD, fontSize=12, leading=16, textColor=NAVY, alignment=TA_CENTER, spaceAfter=6),
+    "name": _ps("Name", fontName=FONT_BOLD, fontSize=20, leading=24, textColor=NAVY, alignment=TA_CENTER, spaceAfter=3),
+    "headline": _ps("Headline", fontName=FONT_BOLD, fontSize=10.5, leading=14, textColor=NAVY, alignment=TA_CENTER, spaceAfter=5),
+    "contact": _ps("Contact", fontSize=8.5, leading=12, alignment=TA_CENTER, spaceAfter=8),
+    "section": _ps("Section", fontName=FONT_BOLD, fontSize=10.5, leading=14, textColor=NAVY, spaceBefore=12, spaceAfter=7, keepWithNext=True),
+    "body": _ps("Body", alignment=TA_JUSTIFY, spaceAfter=BODY_AFTER),
+    "bullet": _ps("Bullet", alignment=TA_JUSTIFY, leftIndent=14, bulletIndent=0, bulletFontName=FONT,
+                  bulletFontSize=BODY_SIZE, spaceAfter=BODY_AFTER),
+    "job": _ps("Job", fontName=FONT_BOLD, spaceBefore=4, spaceAfter=2, keepWithNext=True),
+    "detail": _ps("Detail", spaceAfter=BODY_AFTER),
+    "cell": _ps("Cell"),  # used inside two-column tables (row padding supplies the spacing)
 }
 
 
@@ -114,9 +191,26 @@ def section(story, title):
     story.append(Paragraph(esc(title.upper()), S["section"]))
 
 
-def bullets(story, values):
-    for value in values:
-        story.append(Paragraph("• " + esc(value), S["bullet"]))
+def bullet_para(value):
+    return Paragraph(esc(value), S["bullet"], bulletText="•")
+
+
+def two_columns(story, cells, width, gap=BODY_AFTER):
+    """Lay flowables out in two equal columns, filled left-to-right then down (keeps reading order)."""
+    cells = list(cells)
+    if not cells:
+        return
+    rows = [cells[i:i + 2] + [""] * (2 - len(cells[i:i + 2])) for i in range(0, len(cells), 2)]
+    table = Table(rows, colWidths=[width / 2.0, width / 2.0], hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (0, -1), 14),
+        ("RIGHTPADDING", (1, 0), (1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), gap),
+    ]))
+    story.append(table)
 
 
 def nonempty(records, keys):
@@ -141,7 +235,7 @@ def make_pdf(cv):
     contact = [x for x in (cv["phone"], cv["email"], cv["location"], cv["linkedin"], cv["portfolio"]) if x.strip()]
     if contact:
         story.append(Paragraph(" | ".join(esc(x) for x in contact), S["contact"]))
-    story.append(HRFlowable(width="100%", thickness=1.2, color=BLUE, spaceBefore=2, spaceAfter=5))
+    story.append(HRFlowable(width="100%", thickness=1.2, color=NAVY, spaceBefore=2, spaceAfter=5))
 
     if cv["profile"].strip():
         section(story, "Professional Profile")
@@ -149,7 +243,7 @@ def make_pdf(cv):
         story.append(Spacer(1, 5))
     if lines(cv["competencies"]):
         section(story, "Core Competencies")
-        bullets(story, lines(cv["competencies"]))
+        two_columns(story, [bullet_para(x) for x in lines(cv["competencies"])], doc.width)
         story.append(Spacer(1, 5))
 
     exp = nonempty(cv["experience"], ["role", "organisation", "duties"])
@@ -163,7 +257,7 @@ def make_pdf(cv):
                 block.append(Paragraph(detail, S["detail"]))
             if item["summary"].strip():
                 block.append(Paragraph(esc(item["summary"]), S["body"]))
-            block.extend(Paragraph("• " + esc(d), S["bullet"]) for d in lines(item["duties"]))
+            block.extend(bullet_para(d) for d in lines(item["duties"]))
             block.append(Spacer(1, 6))
             story.append(KeepTogether(block))
 
@@ -185,9 +279,8 @@ def make_pdf(cv):
                       ("Registration certificate number", r["certificate_no"]), ("Year of registration", r["year"])]
             validity = " to ".join(x for x in (r["valid_from"], r["valid_to"]) if x.strip())
             fields.append(("Licence validity", validity))
-            for label, value in fields:
-                if value.strip():
-                    story.append(Paragraph(f"<b>{esc(label)}:</b> {esc(value)}", S["body"]))
+            cells = [Paragraph(f"<b>{esc(label)}:</b> {esc(value)}", S["cell"]) for label, value in fields if value.strip()]
+            two_columns(story, cells, doc.width)
             story.append(Spacer(1, 5))
 
     certs = nonempty(cv["certifications"], ["name", "institution", "year"])
@@ -195,8 +288,9 @@ def make_pdf(cv):
         section(story, "Certifications and Professional Development")
         for c in certs:
             detail = " | ".join(esc(x) for x in (c["institution"], c["year"]) if x.strip())
-            story.append(Paragraph(f"<b>{esc(c['name'])}</b>" + (f"<br/>{detail}" if detail else ""), S["body"]))
-            story.append(Spacer(1, 3))
+            story.append(Paragraph(esc(c["name"]), S["job"]))
+            if detail:
+                story.append(Paragraph(detail, S["detail"]))
         story.append(Spacer(1, 4))
 
     pubs = nonempty(cv["publications"], ["authors", "title", "date", "apa"])
@@ -210,34 +304,34 @@ def make_pdf(cv):
 
     if lines(cv["digital_skills"]):
         section(story, "Digital and Technical Skills")
-        bullets(story, lines(cv["digital_skills"]))
+        two_columns(story, [bullet_para(x) for x in lines(cv["digital_skills"])], doc.width)
         story.append(Spacer(1, 5))
 
     langs = nonempty(cv["languages"], ["language", "level"])
     if langs:
         section(story, "Languages")
-        for item in langs:
-            story.append(Paragraph(f"<b>{esc(item['language'])}:</b> {esc(item['level'])}", S["body"]))
+        cells = [Paragraph(f"<b>{esc(item['language'])}:</b> {esc(item['level'])}", S["cell"]) for item in langs]
+        two_columns(story, cells, doc.width)
         story.append(Spacer(1, 5))
 
     refs = nonempty(cv["references"], ["name", "title", "organisation", "phone", "email"])
     if refs:
         section(story, "Referees")
+        cells = []
         for r in refs:
             parts = referee_lines(r)
-            block = [Paragraph(f"<b>{esc(parts[0])}</b>" if r["name"].strip() and i == 0 else esc(x), S["ref"])
-                     for i, x in enumerate(parts)]
-            block.append(Spacer(1, 8))
-            story.append(KeepTogether(block))
+            cells.append([Paragraph(f"<b>{esc(x)}</b>" if r["name"].strip() and i == 0 else esc(x), S["cell"])
+                          for i, x in enumerate(parts)])
+        two_columns(story, cells, doc.width, gap=10)
 
     def footer(canvas, document):
         canvas.saveState()
         w, _ = A4
-        canvas.setStrokeColor(LINE)
+        canvas.setStrokeColor(NAVY)
         canvas.setLineWidth(0.45)
         canvas.line(19*mm, 12*mm, w-19*mm, 12*mm)
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(SUBTITLE)
+        canvas.setFont(FONT, 8)
+        canvas.setFillColor(SLATE)
         canvas.drawString(19*mm, 8*mm, "CURRICULUM VITAE")
         canvas.drawRightString(w-19*mm, 8*mm, f"Page {document.page}")
         canvas.restoreState()
@@ -440,84 +534,91 @@ def get_cv():
 
 
 def cv_preview_html(cv: dict) -> str:
-    """Paper-style CV preview that mirrors the PDF, with single line spacing (one line of HTML, no blank lines)."""
+    """Paper-style CV preview that mirrors the PDF: Cambria 12 pt, justified, single spacing, 6 pt after paragraphs."""
     def t(x):
         return escape(str(x or "").strip(), quote=False).replace("\n", "<br>")
 
-    h = ['<div style="background:#FFFFFF;color:#202A35;font-family:Helvetica,Arial,sans-serif;font-size:13px;'
-         'line-height:1.2;max-width:780px;margin:8px auto 24px;padding:40px 52px;border:1px solid #AAB7C7;'
-         'border-radius:4px;box-shadow:0 6px 20px rgba(23,54,93,0.18);">']
+    h = [f'<div style="box-sizing:border-box;background:#FFFFFF;color:#333333;font-family:{PAPER_FONT};font-size:12pt;'
+         'line-height:1.2;max-width:794px;margin:8px auto 24px;padding:46px 72px;border:1px solid #AAB7C7;'
+         'border-radius:4px;box-shadow:0 6px 20px rgba(27,54,93,0.18);">']
 
     def heading(title):
-        h.append(f'<div style="font-size:14px;font-weight:700;color:#17365D;margin:16px 0 8px;">{t(title.upper())}</div>')
+        h.append(f'<div style="font-size:10.5pt;font-weight:700;color:#1B365D;margin:12pt 0 7pt;">{t(title.upper())}</div>')
 
-    def para(text, extra=""):
-        h.append(f'<div style="margin-bottom:5px;{extra}">{t(text)}</div>')
+    def para(text):
+        h.append(f'<div style="text-align:justify;margin-bottom:6pt;">{t(text)}</div>')
 
-    def bullet(text):
-        h.append(f'<div style="padding-left:14px;text-indent:-9px;margin-bottom:4px;">&bull;&nbsp;{t(text)}</div>')
+    def bullet_html(text):
+        return ('<div style="padding-left:14pt;text-indent:-14pt;text-align:justify;">'
+                '<span style="display:inline-block;width:14pt;text-indent:0;">&bull;</span>' + t(text) + "</div>")
 
-    h.append('<div style="text-align:center;font-size:15px;font-weight:700;letter-spacing:1.5px;color:#2F5597;margin-bottom:8px;">CURRICULUM VITAE</div>')
-    h.append(f'<div style="text-align:center;font-size:26px;font-weight:700;color:#17365D;">{t(cv["name"].upper())}</div>')
+    def grid(cells, gap=6):
+        """Two columns, filled left-to-right then down (inline blocks, no whitespace between them)."""
+        out = []
+        for i, cell in enumerate(cells):
+            margin = "margin-right:4%;" if i % 2 == 0 else ""
+            out.append(f'<div style="display:inline-block;vertical-align:top;width:47.9%;{margin}margin-bottom:{gap}pt;">{cell}</div>')
+        h.append("".join(out))
+        h.append('<div style="clear:both;"></div>')
+
+    h.append('<div style="text-align:center;font-size:12pt;font-weight:700;color:#1B365D;margin-bottom:6pt;">CURRICULUM VITAE</div>')
+    h.append(f'<div style="text-align:center;font-size:20pt;font-weight:700;line-height:1.2;color:#1B365D;">{t(cv["name"].upper())}</div>')
     if cv["headline"].strip():
-        h.append(f'<div style="text-align:center;font-weight:700;color:#2F5597;margin-top:4px;">{t(cv["headline"])}</div>')
+        h.append(f'<div style="text-align:center;font-size:10.5pt;font-weight:700;color:#1B365D;margin-top:3pt;">{t(cv["headline"])}</div>')
     contact = " | ".join(t(x) for x in (cv["phone"], cv["email"], cv["location"], cv["linkedin"], cv["portfolio"]) if x.strip())
     if contact:
-        h.append(f'<div style="text-align:center;font-size:12px;margin-top:4px;">{contact}</div>')
-    h.append('<div style="border-top:2px solid #2F5597;margin:10px 0 4px;"></div>')
+        h.append(f'<div style="text-align:center;font-size:8.5pt;margin-top:4pt;">{contact}</div>')
+    h.append('<div style="border-top:1.2pt solid #1B365D;margin:8pt 0 4pt;"></div>')
 
     if cv["profile"].strip():
         heading("Professional Profile")
         para(cv["profile"])
     if lines(cv["competencies"]):
         heading("Core Competencies")
-        for x in lines(cv["competencies"]):
-            bullet(x)
+        grid([bullet_html(x) for x in lines(cv["competencies"])])
 
     exp = nonempty(cv["experience"], ["role", "organisation", "duties"])
     if exp:
         heading("Professional Experience")
         for item in exp:
-            h.append(f'<div style="font-weight:700;margin-top:6px;margin-bottom:2px;">{t(item["role"])}</div>')
+            h.append(f'<div style="font-weight:700;margin:4pt 0 2pt;">{t(item["role"])}</div>')
             detail = " | ".join(t(x) for x in (item["organisation"], item["location"], item["dates"]) if x.strip())
             if detail:
-                h.append(f'<div style="color:#3F4B59;font-size:12px;margin-bottom:4px;">{detail}</div>')
+                h.append(f'<div style="margin-bottom:6pt;">{detail}</div>')
             if item["summary"].strip():
                 para(item["summary"])
             for duty in lines(item["duties"]):
-                bullet(duty)
-            h.append('<div style="height:6px;"></div>')
+                h.append('<div style="margin-bottom:6pt;">' + bullet_html(duty) + "</div>")
+            h.append('<div style="height:6pt;"></div>')
 
     edu = nonempty(cv["education"], ["qualification", "institution"])
     if edu:
         heading("Education")
         for item in edu:
-            h.append(f'<div style="font-weight:700;margin-top:4px;margin-bottom:2px;">{t(item["qualification"])}</div>')
+            h.append(f'<div style="font-weight:700;margin:4pt 0 2pt;">{t(item["qualification"])}</div>')
             detail = " | ".join(t(x) for x in (item["institution"], item["dates"], item["details"]) if x.strip())
             if detail:
-                h.append(f'<div style="color:#3F4B59;font-size:12px;margin-bottom:4px;">{detail}</div>')
+                h.append(f'<div style="margin-bottom:6pt;">{detail}</div>')
 
     regs = nonempty(cv["registrations"], ["body", "licence_no", "certificate_no", "year", "valid_from", "valid_to"])
     if regs:
         heading("Professional Registration and Licensure")
         for r in regs:
             validity = " to ".join(x for x in (r["valid_from"], r["valid_to"]) if x.strip())
-            for label, value in (("Professional body", r["body"]), ("Licence number", r["licence_no"]),
-                                 ("Registration certificate number", r["certificate_no"]),
-                                 ("Year of registration", r["year"]), ("Licence validity", validity)):
-                if value.strip():
-                    para(f"{label}: {value}", "")
-            h.append('<div style="height:5px;"></div>')
+            fields = (("Professional body", r["body"]), ("Licence number", r["licence_no"]),
+                      ("Registration certificate number", r["certificate_no"]),
+                      ("Year of registration", r["year"]), ("Licence validity", validity))
+            grid([f"<b>{t(label)}:</b> {t(value)}" for label, value in fields if value.strip()])
+            h.append('<div style="height:5pt;"></div>')
 
     certs = nonempty(cv["certifications"], ["name", "institution", "year"])
     if certs:
         heading("Certifications and Professional Development")
         for c in certs:
-            h.append(f'<div style="font-weight:700;">{t(c["name"])}</div>')
+            h.append(f'<div style="font-weight:700;margin:4pt 0 2pt;">{t(c["name"])}</div>')
             detail = " | ".join(t(x) for x in (c["institution"], c["year"]) if x.strip())
             if detail:
-                h.append(f'<div>{detail}</div>')
-            h.append('<div style="height:5px;"></div>')
+                h.append(f'<div style="margin-bottom:6pt;">{detail}</div>')
 
     pubs = nonempty(cv["publications"], ["authors", "title", "date", "apa"])
     if pubs:
@@ -525,28 +626,28 @@ def cv_preview_html(cv: dict) -> str:
         for p in pubs:
             for label, key in (("Authors", "authors"), ("Title", "title"), ("Date of publication", "date"), ("APA reference", "apa")):
                 if p[key].strip():
-                    para(f"{label}: {p[key]}")
-            h.append('<div style="height:6px;"></div>')
+                    h.append(f'<div style="text-align:justify;margin-bottom:6pt;"><b>{label}:</b> {t(p[key])}</div>')
+            h.append('<div style="height:6pt;"></div>')
 
     if lines(cv["digital_skills"]):
         heading("Digital and Technical Skills")
-        for x in lines(cv["digital_skills"]):
-            bullet(x)
+        grid([bullet_html(x) for x in lines(cv["digital_skills"])])
 
     langs = nonempty(cv["languages"], ["language", "level"])
     if langs:
         heading("Languages")
-        for item in langs:
-            para(f"{item['language'].strip()}: {item['level'].strip()}")
+        grid([f"<b>{t(item['language'])}:</b> {t(item['level'])}" for item in langs])
 
     refs = nonempty(cv["references"], ["name", "title", "organisation", "phone", "email"])
     if refs:
         heading("Referees")
+        cells = []
         for r in refs:
             parts = [t(x) for x in referee_lines(r)]
             if r["name"].strip():
                 parts[0] = f"<b>{parts[0]}</b>"
-            h.append('<div style="margin-bottom:10px;">' + "<br>".join(parts) + "</div>")
+            cells.append("<br>".join(parts))
+        grid(cells, gap=10)
 
     h.append("</div>")
     return "".join(h)
@@ -598,7 +699,8 @@ def cv_page():
 
         st.divider()
         st.subheader("Generate PDF")
-        st.write("The PDF uses a centred header, high-contrast headings, consistent section spacing, a single-column reading order, standard section names and selectable text. No tables or graphics are used in the CV body.")
+        st.write("The PDF uses a centred header, navy headings, justified slate-grey body text with single line spacing, standard section names and selectable text. Short lists (competencies, skills, languages, registration details and referees) are set in two columns; everything else is a single column with no graphics.")
+        st.caption(f"PDF font: {FONT_LABEL}")
         try:
             pdf = make_pdf(cv)
             filename = re.sub(r"[^A-Za-z0-9_-]+", "_", cv["name"]).strip("_") or "Professional_CV"
@@ -733,17 +835,17 @@ def build_letter_pdf(d: dict) -> bytes:
     )
 
     def style(name, **over):
-        props = dict(fontName="Helvetica", fontSize=10.5, leading=15, textColor=colors.black)
+        props = dict(fontName=FONT, fontSize=BODY_SIZE, leading=BODY_LEADING, textColor=SLATE)
         props.update(over)
         return ParagraphStyle(name, **props)
 
-    s_type = style("l_type", fontName="Helvetica-Bold", fontSize=12, leading=16, alignment=TA_CENTER, spaceAfter=6)
-    s_name = style("l_name", fontName="Helvetica-Bold", fontSize=18, leading=22, alignment=TA_CENTER)
-    s_sub = style("l_sub", alignment=TA_CENTER)
+    s_type = style("l_type", fontName=FONT_BOLD, leading=16, textColor=NAVY, alignment=TA_CENTER, spaceAfter=6)
+    s_name = style("l_name", fontName=FONT_BOLD, fontSize=18, leading=22, textColor=NAVY, alignment=TA_CENTER)
+    s_sub = style("l_sub", fontSize=10.5, leading=14, alignment=TA_CENTER)
     s_left = style("l_left", alignment=TA_LEFT)
-    s_bold = style("l_bold", fontName="Helvetica-Bold", alignment=TA_LEFT)
-    s_re = style("l_re", fontName="Helvetica-Bold", alignment=TA_CENTER)
-    s_body = style("l_body", alignment=TA_JUSTIFY, leading=16, spaceAfter=24)  # 1.5 line spacing after each paragraph
+    s_bold = style("l_bold", fontName=FONT_BOLD, alignment=TA_LEFT)
+    s_re = style("l_re", fontName=FONT_BOLD, textColor=NAVY, alignment=TA_CENTER)
+    s_body = style("l_body", alignment=TA_JUSTIFY, spaceAfter=BODY_AFTER)  # same body format as the CV
 
     story = [Paragraph(safe_text(d["letter_type"].upper()), s_type), Paragraph(safe_text(d["name"].upper()), s_name)]
     if d["headline"].strip():
@@ -752,7 +854,7 @@ def build_letter_pdf(d: dict) -> bytes:
     if contact:
         story.append(Paragraph(contact, s_sub))
     story.append(Spacer(1, 6))
-    story.append(HRFlowable(width="100%", thickness=0.8, color=colors.black, spaceAfter=14))
+    story.append(HRFlowable(width="100%", thickness=0.8, color=NAVY, spaceAfter=14))
 
     story.append(Paragraph(safe_text(d["date"]), s_left))
     story.append(Spacer(1, 12))
@@ -794,39 +896,42 @@ def build_letter_pdf(d: dict) -> bytes:
     return buf.getvalue()
 
 
+PAPER_FONT = "Cambria,Caladea,'Times New Roman',Times,serif"
+
+
 def letter_preview_html(d: dict) -> str:
     """A paper-style on-screen preview that mirrors the PDF layout (single line of HTML, no blank lines)."""
     def t(x):
         return escape((x or "").strip(), quote=False).replace("\n", "<br>")
 
-    h = ['<div style="background:#FFFFFF;color:#111111;font-family:Helvetica,Arial,sans-serif;font-size:14px;'
-         'line-height:1.5;max-width:780px;margin:8px auto 24px;padding:44px 58px;border:1px solid #AAB7C7;'
-         'border-radius:4px;box-shadow:0 6px 20px rgba(23,54,93,0.18);">']
-    h.append(f'<div style="text-align:center;font-size:15px;font-weight:700;letter-spacing:1.5px;color:#000000;margin-bottom:8px;">{t(d["letter_type"].upper())}</div>')
-    h.append(f'<div style="text-align:center;font-size:24px;font-weight:700;line-height:1.25;color:#000000;">{t(d["name"].upper())}</div>')
+    h = [f'<div style="box-sizing:border-box;background:#FFFFFF;color:#333333;font-family:{PAPER_FONT};font-size:12pt;'
+         'line-height:1.2;max-width:794px;margin:8px auto 24px;padding:46px 83px;border:1px solid #AAB7C7;'
+         'border-radius:4px;box-shadow:0 6px 20px rgba(27,54,93,0.18);">']
+    h.append(f'<div style="text-align:center;font-size:12pt;font-weight:700;color:#1B365D;margin-bottom:6pt;">{t(d["letter_type"].upper())}</div>')
+    h.append(f'<div style="text-align:center;font-size:18pt;font-weight:700;line-height:1.2;color:#1B365D;">{t(d["name"].upper())}</div>')
     if d["headline"].strip():
-        h.append(f'<div style="text-align:center;">{t(d["headline"])}</div>')
+        h.append(f'<div style="text-align:center;font-size:10.5pt;">{t(d["headline"])}</div>')
     contact = " | ".join(t(x) for x in (d["phone"], d["email"], d["location"]) if x.strip())
     if contact:
-        h.append(f'<div style="text-align:center;">{contact}</div>')
-    h.append('<div style="border-top:1.5px solid #000000;margin:12px 0 18px;"></div>')
-    h.append(f'<div style="margin-bottom:16px;">{t(d["date"])}</div>')
+        h.append(f'<div style="text-align:center;font-size:10.5pt;">{contact}</div>')
+    h.append('<div style="border-top:1px solid #1B365D;margin:8pt 0 14pt;"></div>')
+    h.append(f'<div style="margin-bottom:12pt;">{t(d["date"])}</div>')
 
     addr = address_lines(d)
     if addr:
-        h.append('<div style="margin-bottom:18px;">' + "<br>".join(t(x) for x in addr) + "</div>")
+        h.append('<div style="margin-bottom:14pt;">' + "<br>".join(t(x) for x in addr) + "</div>")
     if d["include_salutation"] and d["salutation"].strip():
-        h.append(f'<div style="margin-bottom:14px;">{t(d["salutation"])}</div>')
+        h.append(f'<div style="margin-bottom:10pt;">{t(d["salutation"])}</div>')
     if d["re_line"].strip():
-        h.append(f'<div style="text-align:center;font-weight:700;margin-bottom:16px;">RE: {t(d["re_line"].upper())}</div>')
+        h.append(f'<div style="text-align:center;font-weight:700;color:#1B365D;margin-bottom:12pt;">RE: {t(d["re_line"].upper())}</div>')
     for p in body_paragraphs(d["body"]):
-        h.append('<p style="text-align:justify;margin:0 0 24px;">' + "<br>".join(t(x) for x in p.split("\n")) + "</p>")
+        h.append('<p style="text-align:justify;margin:0 0 6pt;">' + "<br>".join(t(x) for x in p.split("\n")) + "</p>")
 
     if d["include_closing"]:
-        h.append(f'<div style="margin-top:10px;">{t(d["closing"])}</div>')
+        h.append(f'<div style="margin-top:8pt;">{t(d["closing"])}</div>')
         if d["signature_png"]:
             b64 = base64.b64encode(d["signature_png"]).decode("ascii")
-            h.append(f'<img src="data:image/png;base64,{b64}" style="display:block;max-height:49px;max-width:121px;margin:8px 0;">')
+            h.append(f'<img src="data:image/png;base64,{b64}" style="display:block;max-height:49px;max-width:121px;margin:6pt 0 4pt;">')
         else:
             h.append('<div style="height:40px;"></div>')
         h.append(f'<div style="font-weight:700;">{t(d["sign_name"])}</div>')
@@ -956,6 +1061,7 @@ def letter_page():
 
         st.divider()
         st.subheader("Generate PDF")
+        st.caption(f"PDF font: {FONT_LABEL}")
         for p in problems:
             st.warning(p)
         if not problems:
