@@ -282,7 +282,7 @@ def make_pdf(cv):
             block = [heading]
             if detail:
                 block.append(Paragraph(detail, S["detail"]))
-            for label, key in (("Institution description", "institution"), ("Project", "summary")):
+            for label, key in (("Hospital description", "hospital"), ("Project", "summary")):
                 if item.get(key, "").strip():
                     block.append(Paragraph(f"<b>{label}:</b> {esc(item[key])}", S["body"]))
             for label, key in (("Responsibilities", "duties"), ("Achievements", "achievements")):
